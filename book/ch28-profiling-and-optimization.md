@@ -1,0 +1,942 @@
+# 第28章 プロファイリングと最適化
+
+「速いコードを書く」より「**遅い場所を見つける**」方が100倍大事です。
+この章では、計測の方法と、実際に効く最適化を体系的に扱います。
+
+## 28.1 最適化の3原則
+
+> **原則1: 測定せずに最適化するな。**
+> あなたの直感は、ほぼ確実に外れています。
+
+> **原則2: 動くコードを先に書け。**
+> 「早すぎる最適化は諸悪の根源」— Donald Knuth
+> （ただし、この言葉は「設計段階でデータ構造を考えるな」という意味ではありません）
+
+> **原則3: 上位1〜2箇所だけ直せ。**
+> 実行時間の80%は、コードの数%に集中しています（Amdahlの法則）。
+
+### Amdahl の法則
+
+```
+   全体の 20% を占める処理を 10倍速くしても…
+
+   高速化後の時間 = 80% + 20%/10 = 82%
+   → 全体では 1.2倍にしかならない
+```
+
+**まず「何が80%か」を知ること。** それが計測です。
+
+---
+
+## 28.2 計測の基本: 時間を測る
+
+### 手軽な方法: ScopedTimer
+
+```cpp
+// include/chemcpp/profile.hpp
+#pragma once
+
+#include <chrono>
+#include <iostream>
+#include <map>
+#include <mutex>
+#include <string>
+
+namespace chemcpp {
+
+class Profiler {
+public:
+    static Profiler& instance() {
+        static Profiler p;
+        return p;
+    }
+
+    void record(const std::string& name, double ms) {
+        std::lock_guard lock(mutex_);
+        auto& e = entries_[name];
+        e.total_ms += ms;
+        e.count += 1;
+        if (ms > e.max_ms) e.max_ms = ms;
+    }
+
+    void report(std::ostream& os = std::cerr) const {
+        std::lock_guard lock(mutex_);
+        double grand_total = 0;
+        for (const auto& [k, v] : entries_) grand_total += v.total_ms;
+
+        os << "\n=== Profile ===\n";
+        os << "name                        calls      total(ms)   avg(ms)"
+              "    max(ms)   %\n";
+        for (const auto& [name, e] : entries_) {
+            os << std::left << std::setw(26) << name << std::right
+               << std::setw(9)  << e.count
+               << std::setw(14) << std::fixed << std::setprecision(2) << e.total_ms
+               << std::setw(11) << (e.total_ms / e.count)
+               << std::setw(11) << e.max_ms
+               << std::setw(7)  << std::setprecision(1)
+               << (grand_total > 0 ? e.total_ms / grand_total * 100 : 0)
+               << "\n";
+        }
+    }
+
+private:
+    struct Entry { double total_ms = 0; double max_ms = 0; long long count = 0; };
+    mutable std::mutex               mutex_;
+    std::map<std::string, Entry>     entries_;
+};
+
+class ScopedTimer {
+public:
+    explicit ScopedTimer(std::string name)
+        : name_(std::move(name)),
+          start_(std::chrono::steady_clock::now()) {}
+
+    ~ScopedTimer() {
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - start_).count();
+        Profiler::instance().record(name_, ms);
+    }
+
+    ScopedTimer(const ScopedTimer&) = delete;
+    ScopedTimer& operator=(const ScopedTimer&) = delete;
+
+private:
+    std::string                                  name_;
+    std::chrono::steady_clock::time_point        start_;
+};
+
+}  // namespace chemcpp
+
+// マクロで使いやすく（NDEBUG で無効化できる）
+#ifdef CHEMCPP_ENABLE_PROFILING
+  #define CHEM_PROFILE(name) ::chemcpp::ScopedTimer _timer_##__LINE__(name)
+#else
+  #define CHEM_PROFILE(name) ((void)0)
+#endif
+```
+
+使い方:
+
+```cpp
+void process_library(const std::vector<std::string>& smiles) {
+    CHEM_PROFILE("process_library");
+
+    for (const auto& s : smiles) {
+        std::optional<Molecule> mol;
+        { CHEM_PROFILE("parse");        mol = parse_smiles(s); }
+        if (!mol) continue;
+        { CHEM_PROFILE("fingerprint");  fps.push_back(morgan_fingerprint(*mol)); }
+        { CHEM_PROFILE("descriptors");  descs.push_back(compute_descriptors(*mol)); }
+    }
+}
+
+int main() {
+    process_library(smiles);
+    chemcpp::Profiler::instance().report();
+}
+```
+
+```
+=== Profile ===
+name                        calls      total(ms)   avg(ms)    max(ms)   %
+descriptors                100000        1842.31      0.02       0.41  21.4
+fingerprint                100000        4218.77      0.04       0.93  49.0
+parse                      100000        2545.02      0.03       0.62  29.6
+```
+
+**フィンガープリント計算が49%。** ここを最適化すべきです。
+
+> ⚠️ **計測自体のオーバーヘッドに注意。**
+> ScopedTimer は1回あたり数十ナノ秒かかります。
+> 1マイクロ秒未満の関数に仕込むと、計測が結果を歪めます。
+> その場合は「1万回ループの合計」を測ってください。
+
+---
+
+## 28.3 プロファイラを使う
+
+### Linux: perf
+
+```bash
+# ビルド（デバッグ情報付きの最適化ビルド）
+g++ -std=c++20 -O2 -g -fno-omit-frame-pointer prog.cpp -o prog
+
+# サンプリングプロファイル
+perf record -g --call-graph dwarf ./prog
+perf report
+
+# ホットな関数だけ表示
+perf report --stdio --sort=symbol | head -30
+
+# キャッシュミスの計測
+perf stat -e cache-references,cache-misses,instructions,cycles ./prog
+
+# 分岐予測ミス
+perf stat -e branches,branch-misses ./prog
+```
+
+`perf stat` の出力例:
+
+```
+     45,821,392,110      cycles
+     92,183,441,203      instructions       #  2.01  insn per cycle
+      1,284,913,022      cache-references
+        412,883,911      cache-misses       # 32.13% of all cache refs   ★ 悪い
+      8,291,447,102      branches
+         52,918,443      branch-misses      #  0.64% of all branches
+```
+
+**IPC (instructions per cycle) が 2.0 前後なら健全。1.0以下なら何かが詰まっています。**
+**キャッシュミス率が20%を超えていたら、メモリレイアウトを疑ってください。**
+
+### macOS: Instruments
+
+```bash
+xcrun xctrace record --template "Time Profiler" --launch ./prog
+# または Xcode の Instruments.app を起動
+```
+
+### Windows: Visual Studio Profiler / VTune
+
+Visual Studio の「デバッグ → パフォーマンスプロファイラー」から。
+Intel VTune も無料で使えます（Intel CPUなら詳細な情報が得られます）。
+
+### クロスプラットフォーム: Tracy / gperftools
+
+```cpp
+// Tracy（リアルタイムプロファイラ。ゲーム開発で人気）
+#include <tracy/Tracy.hpp>
+
+void f() {
+    ZoneScoped;              // この関数の時間を記録
+    // ...
+}
+```
+
+### FlameGraph（可視化）
+
+```bash
+git clone https://github.com/brendangregg/FlameGraph
+perf record -F 999 -g ./prog
+perf script | ./FlameGraph/stackcollapse-perf.pl | ./FlameGraph/flamegraph.pl > out.svg
+```
+
+**炎のグラフで、どの関数が時間を食っているか一目瞭然**になります。
+
+---
+
+## 28.4 マイクロベンチマーク
+
+小さな関数の比較には Google Benchmark が便利です。
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+    benchmark
+    GIT_REPOSITORY https://github.com/google/benchmark.git
+    GIT_TAG        v1.9.0
+)
+set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(benchmark)
+
+add_executable(bench bench_main.cpp)
+target_link_libraries(bench PRIVATE chemcpp::chemcpp benchmark::benchmark_main)
+```
+
+```cpp
+// bench/bench_main.cpp
+#include <benchmark/benchmark.h>
+#include <chemcpp/similarity.hpp>
+#include <random>
+
+using namespace chemcpp;
+
+static std::vector<Fingerprint> make_fps(std::size_t n) {
+    std::mt19937_64 rng(42);
+    std::vector<Fingerprint> v(n);
+    for (auto& fp : v)
+        for (int i = 0; i < 40; ++i) {
+            const std::size_t b = rng() % 2048;
+            fp[b / 64] |= 1ULL << (b % 64);
+        }
+    return v;
+}
+
+static void BM_Tanimoto(benchmark::State& state) {
+    auto fps = make_fps(1000);
+    std::size_t i = 0;
+    for (auto _ : state) {
+        double t = tanimoto(fps[i % 1000], fps[(i + 1) % 1000]);
+        benchmark::DoNotOptimize(t);      // ★ 最適化で消されないように
+        ++i;
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+BENCHMARK(BM_Tanimoto);
+
+static void BM_TanimotoPrecomputed(benchmark::State& state) {
+    auto fps = make_fps(1000);
+    std::vector<int> counts(1000);
+    for (std::size_t k = 0; k < 1000; ++k) counts[k] = popcount(fps[k]);
+
+    std::size_t i = 0;
+    for (auto _ : state) {
+        const std::size_t a = i % 1000, b = (i + 1) % 1000;
+        int inter = 0;
+        for (std::size_t w = 0; w < FP_WORDS; ++w)
+            inter += std::popcount(fps[a][w] & fps[b][w]);
+        const int uni = counts[a] + counts[b] - inter;
+        double t = uni ? double(inter) / uni : 0.0;
+        benchmark::DoNotOptimize(t);
+        ++i;
+    }
+    state.SetItemsProcessed(state.iterations());
+}
+BENCHMARK(BM_TanimotoPrecomputed);
+
+// パラメータを変えて測る
+static void BM_VectorPushBack(benchmark::State& state) {
+    const std::size_t n = static_cast<std::size_t>(state.range(0));
+    for (auto _ : state) {
+        std::vector<int> v;
+        for (std::size_t i = 0; i < n; ++i) v.push_back(int(i));
+        benchmark::DoNotOptimize(v.data());
+        benchmark::ClobberMemory();
+    }
+    state.SetItemsProcessed(state.iterations() * n);
+}
+BENCHMARK(BM_VectorPushBack)->Range(1024, 1 << 20);
+
+static void BM_VectorReserve(benchmark::State& state) {
+    const std::size_t n = static_cast<std::size_t>(state.range(0));
+    for (auto _ : state) {
+        std::vector<int> v;
+        v.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) v.push_back(int(i));
+        benchmark::DoNotOptimize(v.data());
+        benchmark::ClobberMemory();
+    }
+    state.SetItemsProcessed(state.iterations() * n);
+}
+BENCHMARK(BM_VectorReserve)->Range(1024, 1 << 20);
+```
+
+```bash
+./build/bench --benchmark_repetitions=5 --benchmark_report_aggregates_only=true
+```
+
+```
+------------------------------------------------------------------------
+Benchmark                    Time             CPU   Iterations  items/s
+------------------------------------------------------------------------
+BM_Tanimoto               10.4 ns         10.4 ns     67108864  96.1M/s
+BM_TanimotoPrecomputed     5.8 ns          5.8 ns    120586240 172.4M/s
+BM_VectorPushBack/1024    1832 ns         1832 ns       382000 558.9M/s
+BM_VectorReserve/1024      412 ns          412 ns      1701000   2.48G/s
+```
+
+### `DoNotOptimize` の重要性
+
+```cpp
+for (auto _ : state) {
+    double t = tanimoto(a, b);      // ★ 結果を使わないと、丸ごと消される
+}
+```
+
+コンパイラは「結果を使っていない = 不要」と判断して、計算ごと削除します。
+`benchmark::DoNotOptimize(t)` は「この値は使われている」とコンパイラに信じさせます。
+
+> ⚠️ **これがないと、「0ナノ秒！」という結果が出ます。**
+> 自作ベンチマークでも `volatile` 変数に代入するなどの対策が必要です。
+
+---
+
+## 28.5 ★実際に効く最適化 12箇条★
+
+### ① reserve する
+
+```cpp
+std::vector<Fingerprint> fps;
+fps.reserve(n);              // ★ これだけで数倍
+```
+
+**効果: 2〜5倍**（第7章）
+
+### ② コピーを避ける
+
+```cpp
+for (const auto& x : v)      // ✓ auto x ではない
+void f(const std::string& s) // ✓ std::string s ではない
+```
+
+**効果: 場合により10倍**（第5章、第12章）
+
+### ③ メモリレイアウトを連続にする
+
+```cpp
+std::vector<std::vector<double>> bad(n, std::vector<double>(m));   // ✗
+std::vector<double> good(n * m);                                    // ✓
+```
+
+**効果: 2〜30倍**（第6章、第7章）
+
+### ④ アルゴリズムを変える
+
+```cpp
+// O(n²) → O(n log n) → O(n)
+// 枝刈り、早期終了、インデックス
+```
+
+**効果: 10〜10000倍**（最も効く）
+
+### ⑤ ループの中でヒープ確保しない
+
+```cpp
+// ✗
+for (const auto& mol : mols) {
+    std::vector<int> buf(1000);      // 毎回 malloc
+    process(mol, buf);
+}
+
+// ✓
+std::vector<int> buf(1000);
+for (const auto& mol : mols) {
+    std::fill(buf.begin(), buf.end(), 0);
+    process(mol, buf);
+}
+```
+
+**効果: 2〜10倍**
+
+### ⑥ 除算を避ける
+
+```cpp
+// ✗ 除算は20〜40サイクル
+for (int i = 0; i < n; ++i) result[i] = data[i] / total;
+
+// ✓ 乗算は3〜5サイクル
+const double inv = 1.0 / total;
+for (int i = 0; i < n; ++i) result[i] = data[i] * inv;
+```
+
+**効果: 2〜5倍**（除算が支配的なループで）
+
+### ⑦ 分岐を減らす
+
+```cpp
+// ✗ 予測しにくい分岐
+for (int x : v) if (x > threshold) sum += x;
+
+// ✓ 分岐なし（cmov に変換される）
+for (int x : v) sum += (x > threshold) ? x : 0;
+
+// ✓✓ さらに: ソートしておくと分岐予測が当たる
+std::sort(v.begin(), v.end());
+```
+
+**効果: 1.5〜6倍**（分岐予測ミスは15〜20サイクルのペナルティ）
+
+> 💡 **有名な実験**: Stack Overflow の「なぜソート済み配列の処理は速いのか」
+> という質問。同じコードが、ソート済みだと6倍速くなります。
+> 分岐予測が当たるようになるためです。
+
+### ⑧ インライン展開を促す
+
+```cpp
+// ヘッダに実装を書く（小さい関数）
+inline int popcount(const Fingerprint& fp) { ... }
+
+// または LTO を有効化
+set_property(TARGET x PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+```
+
+**効果: 1.1〜3倍**
+
+### ⑨ データ型を小さくする
+
+```cpp
+std::vector<double> mw;        // 8 bytes/mol
+std::vector<float>  mw;        // 4 bytes/mol  ★ キャッシュに2倍載る
+
+std::uint32_t atom_index;      // 4 bytes（ポインタの半分）
+std::uint8_t  atomic_num;      // 1 byte
+```
+
+**効果: 1.5〜2倍**（メモリバウンドな処理で）
+
+### ⑩ 構造体のパディングを減らす
+
+```cpp
+// ✗ 24 bytes
+struct Bad { char a; double b; char c; };
+
+// ✓ 16 bytes（大きい順に並べる）
+struct Good { double b; char a; char c; };
+```
+
+```cpp
+static_assert(sizeof(Atom) == 8, "Atom grew unexpectedly");
+```
+
+**効果: 1.2〜1.5倍**
+
+### ⑪ 仮想関数をホットループから外す
+
+```cpp
+// ✗ 1億回の仮想呼び出し
+for (auto& d : descriptors) sum += d->compute(mol);
+
+// ✓ テンプレートか variant（第14章、第15章）
+```
+
+**効果: 1.5〜5倍**
+
+### ⑫ 並列化する
+
+```cpp
+#pragma omp parallel for
+```
+
+**効果: コア数まで**（第25章）
+
+---
+
+## 28.6 コンパイラに仕事をさせる
+
+### 最適化フラグ
+
+| フラグ | 効果 |
+|---|---|
+| `-O0` | 最適化なし（デバッグ用） |
+| `-O1` | 基本的な最適化 |
+| **`-O2`** | **標準。ほとんどの最適化** |
+| `-O3` | さらにベクトル化・ループ展開（コードサイズ増） |
+| `-Ofast` | `-O3` + 浮動小数点の厳密性を犠牲に（**科学計算では危険**） |
+| `-Os` | サイズ優先 |
+| `-march=native` | このCPUの全命令を使う（AVX-512など） |
+| `-flto` | リンク時最適化（ファイル間インライン化） |
+| `-funroll-loops` | ループ展開 |
+| `-DNDEBUG` | assert を無効化 |
+
+> 💡 **推奨の組み合わせ:**
+> - 本番配布: `-O2 -DNDEBUG`
+> - 手元の最速: `-O3 -march=native -DNDEBUG -flto`
+> - プロファイリング: `-O2 -g -fno-omit-frame-pointer`
+>
+> ⚠️ `-Ofast` / `-ffast-math` は NaN/Inf の扱いが変わります。
+> 数値計算では**使わないでください**（第4章）。
+
+### 自動ベクトル化の確認
+
+```bash
+g++ -O3 -march=native -fopt-info-vec-optimized -c prog.cpp
+```
+
+```
+prog.cpp:42:23: optimized: loop vectorized using 32 byte vectors
+prog.cpp:58:19: missed: couldn't vectorize loop
+prog.cpp:58:19: missed: not vectorized: complicated access pattern
+```
+
+**「なぜベクトル化されなかったか」が分かります。**
+
+ベクトル化を妨げる要因:
+- ポインタのエイリアシング（`__restrict` で解決）
+- ループ内の関数呼び出し（インライン化されていない）
+- 条件分岐（`break` など）
+- データ依存（`a[i] = a[i-1] + 1`）
+- 非連続なメモリアクセス
+
+### PGO（プロファイル誘導最適化）
+
+```bash
+# ① プロファイル収集用にビルド
+g++ -O2 -fprofile-generate prog.cpp -o prog
+./prog typical_input.smi          # 代表的な入力で実行
+
+# ② プロファイルを使って再ビルド
+g++ -O2 -fprofile-use prog.cpp -o prog
+```
+
+**分岐予測とインライン化の判断が改善され、5〜20%速くなります。**
+実際のワークロードでプロファイルを取るのがコツです。
+
+### Compiler Explorer で生成コードを見る
+
+https://godbolt.org/
+
+```cpp
+#include <bit>
+#include <cstdint>
+#include <array>
+
+int intersect(const std::array<std::uint64_t,32>& a,
+              const std::array<std::uint64_t,32>& b) {
+    int n = 0;
+    for (int i = 0; i < 32; ++i) n += std::popcount(a[i] & b[i]);
+    return n;
+}
+```
+
+`-O3 -march=x86-64-v4` でコンパイルすると:
+
+```asm
+intersect:
+        vmovdqu64       zmm0, ZMMWORD PTR [rdi]
+        vpandq          zmm0, zmm0, ZMMWORD PTR [rsi]
+        vpopcntq        zmm0, zmm0          ; ★ AVX-512 の popcount
+        ...
+```
+
+**ソースを変えずに、フラグだけでSIMD化されている**のが見えます。
+これを確認せずに手書きSIMDを書くのは時間の無駄です。
+
+---
+
+## 28.7 キャッシュを意識する
+
+### キャッシュの階層（再掲）
+
+| 階層 | サイズ | レイテンシ |
+|---|---|---|
+| レジスタ | ~1KB | 0サイクル |
+| L1 | 32〜64KB | 4サイクル |
+| L2 | 256KB〜2MB | 12サイクル |
+| L3 | 8〜64MB | 40サイクル |
+| DRAM | GB | **200〜400サイクル** |
+
+### ループの順序を変える
+
+```cpp
+// ✗ 遅い: 列優先アクセス（row-major 配列に対して）
+for (std::size_t j = 0; j < cols; ++j)
+    for (std::size_t i = 0; i < rows; ++i)
+        sum += data[i * cols + j];        // メモリを飛び飛びに読む
+
+// ✓ 速い: 行優先アクセス
+for (std::size_t i = 0; i < rows; ++i)
+    for (std::size_t j = 0; j < cols; ++j)
+        sum += data[i * cols + j];        // 連続アクセス
+```
+
+**効果: 5〜20倍**（配列が大きいとき）
+
+### ブロッキング（タイリング）
+
+```cpp
+// 行列積: キャッシュに収まるブロックに分けて処理
+constexpr std::size_t BLOCK = 64;
+
+for (std::size_t ii = 0; ii < n; ii += BLOCK)
+  for (std::size_t jj = 0; jj < n; jj += BLOCK)
+    for (std::size_t kk = 0; kk < n; kk += BLOCK)
+      for (std::size_t i = ii; i < std::min(ii+BLOCK, n); ++i)
+        for (std::size_t j = jj; j < std::min(jj+BLOCK, n); ++j) {
+          double s = c[i*n+j];
+          for (std::size_t k = kk; k < std::min(kk+BLOCK, n); ++k)
+            s += a[i*n+k] * b[k*n+j];
+          c[i*n+j] = s;
+        }
+```
+
+**効果: 3〜10倍**（大きな行列で）
+
+### プリフェッチ
+
+```cpp
+for (std::size_t i = 0; i < n; ++i) {
+    __builtin_prefetch(&data[i + 16], 0, 3);   // 16要素先を先読み
+    process(data[i]);
+}
+```
+
+> ⚠️ **ハードウェアプリフェッチャは既に賢い**ので、
+> 単純な連続アクセスでは効果がありません。
+> ランダムアクセスやポインタチェイシングでのみ有効です。
+> **必ず実測してください**（悪化することもあります）。
+
+---
+
+## 28.8 メモリ使用量の削減
+
+### sizeof で確認する
+
+```cpp
+static_assert(sizeof(Atom) == 8);
+static_assert(sizeof(Bond) == 12);
+static_assert(sizeof(Fingerprint) == 256);
+```
+
+### 実測ツール
+
+```bash
+# ピークメモリ使用量
+/usr/bin/time -v ./prog 2>&1 | grep "Maximum resident"
+
+# 詳細なヒーププロファイル
+valgrind --tool=massif ./prog
+ms_print massif.out.*
+
+# アロケーション回数
+valgrind --tool=callgrind --toggle-collect=malloc ./prog
+```
+
+### メモリを減らす手法
+
+| 手法 | 削減率 |
+|---|---|
+| `double` → `float` | 50% |
+| `std::size_t`(8) → `std::uint32_t`(4) | 50% |
+| 構造体メンバの並べ替え | 10〜30% |
+| `shrink_to_fit()` | 可変 |
+| `std::string` → `std::string_view`（所有しない場合） | 大 |
+| ビットフィールド | 大 |
+| 文字列のインターン化（同じ文字列を共有） | 大 |
+
+```cpp
+// ビットフィールドの例
+struct CompactAtom {
+    std::uint32_t atomic_num : 7;    // 0-118 なので7ビットで足りる
+    std::uint32_t charge     : 4;    // -7 〜 +7
+    std::uint32_t num_h      : 4;    // 0-15
+    std::uint32_t aromatic   : 1;
+    std::uint32_t in_ring    : 1;
+    std::uint32_t chirality  : 2;
+    std::uint32_t reserved   : 13;
+};
+static_assert(sizeof(CompactAtom) == 4);   // 8 bytes → 4 bytes
+```
+
+> ⚠️ ビットフィールドはアクセスにシフトとマスクが必要なので、
+> **CPUの仕事は増えます**。メモリバウンドな処理でのみ有効です。
+
+---
+
+## 28.9 🧪 実践: 最適化の全工程
+
+第21章のECFP計算を、実際に最適化してみます。
+
+### ステップ0: ベースライン
+
+```
+morgan_fingerprint: 486 ms / 100k molecules  (205k fp/s)
+```
+
+### ステップ1: プロファイルを取る
+
+```bash
+perf record -g ./bench_fp
+perf report --stdio | head -20
+```
+
+```
+  38.42%  bench_fp  libstdc++  std::_Hashtable<...>::_M_find_before_node
+  21.17%  bench_fp  bench_fp   morgan_counts
+  14.83%  bench_fp  libc       _int_malloc
+   9.21%  bench_fp  bench_fp   std::__sort
+   6.44%  bench_fp  libc       operator new
+```
+
+**`unordered_map` の検索が38%、malloc が15%。**
+ハッシュマップがボトルネックです。
+
+### ステップ2: unordered_map をやめる
+
+```cpp
+// Before
+std::unordered_map<std::uint32_t, int> features;
+
+// After: ソート済み vector（要素数が数十個なので、こちらが速い）
+std::vector<std::uint32_t> features;
+features.reserve(n * (radius + 1));
+// ... 追加していく ...
+std::sort(features.begin(), features.end());
+features.erase(std::unique(features.begin(), features.end()), features.end());
+```
+
+```
+486 ms → 218 ms   (2.2x)
+```
+
+**要素数が少ないときは、ハッシュマップより配列 + ソートが速い。**
+これは第9章で述べた「キャッシュ効率が計算量に勝る」の実例です。
+
+### ステップ3: メモリ確保を減らす
+
+```cpp
+// Before: 呼び出しごとに vector を作る
+std::vector<std::uint32_t> current(n), next(n);
+
+// After: 呼び出し側でバッファを渡す
+struct MorganWorkspace {
+    std::vector<std::uint32_t> current, next, features;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> nbrs;
+
+    void prepare(std::size_t n, int radius) {
+        current.resize(n);
+        next.resize(n);
+        features.clear();
+        features.reserve(n * (radius + 1));
+        nbrs.reserve(8);
+    }
+};
+
+Fingerprint morgan_fingerprint(const Molecule& mol, const MorganOptions& opt,
+                               MorganWorkspace& ws);
+```
+
+```
+218 ms → 142 ms   (1.5x)
+```
+
+### ステップ4: 小さいソートを特殊化
+
+```cpp
+// 隣接原子は通常 1〜4 個。std::sort は大げさ
+inline void sort_small(std::vector<std::pair<std::uint32_t,std::uint32_t>>& v) {
+    // 挿入ソート（要素数が少ないときは最速）
+    for (std::size_t i = 1; i < v.size(); ++i) {
+        auto key = v[i];
+        std::size_t j = i;
+        while (j > 0 && v[j-1] > key) { v[j] = v[j-1]; --j; }
+        v[j] = key;
+    }
+}
+```
+
+```
+142 ms → 118 ms   (1.2x)
+```
+
+### ステップ5: 並列化
+
+```cpp
+parallel_for_dynamic(mols.size(), [&](std::size_t i, unsigned tid) {
+    fps[i] = morgan_fingerprint(mols[i], opt, workspaces[tid]);
+});
+```
+
+```
+118 ms → 11 ms   (10.7x, 16スレッド)
+```
+
+### 最終結果
+
+| 段階 | 時間 | 累積 |
+|---|---|---|
+| ベースライン | 486 ms | 1.0x |
+| ハッシュマップ除去 | 218 ms | 2.2x |
+| メモリ確保削減 | 142 ms | 3.4x |
+| 小ソート特殊化 | 118 ms | 4.1x |
+| 16スレッド並列化 | 11 ms | **44x** |
+
+**毎秒 900万分子。** RDKit の Python API の200倍以上です。
+
+> 💡 **重要な観察: 手書きSIMDは一度も使っていません。**
+> - データ構造の見直し（2.2x）
+> - メモリ確保の削減（1.5x）
+> - アルゴリズムの特殊化（1.2x）
+> - 並列化（10.7x）
+>
+> これらだけで44倍です。**SIMDは最後の手段**という主張の実例です。
+
+---
+
+## 28.10 最適化のアンチパターン
+
+### ❌ 測らずに最適化する
+
+「たぶんここが遅い」は9割外れます。
+
+### ❌ 読みにくくして1%速くする
+
+```cpp
+// ✗ 読めない上に、コンパイラは同じコードを生成する
+x = (x << 3) + (x << 1);      // x * 10 のつもり
+
+// ✓ コンパイラに任せる
+x = x * 10;
+```
+
+**コンパイラはあなたより賢いです。** 明白な最適化は自動でやってくれます。
+
+### ❌ Debug ビルドで測る
+
+```bash
+# ✗ 10倍遅い数字が出る
+g++ -O0 -g prog.cpp && ./a.out
+
+# ✓
+g++ -O2 -DNDEBUG prog.cpp && ./a.out
+```
+
+### ❌ 1回だけ測る
+
+```cpp
+// ✗ ばらつきが大きい
+auto t0 = now(); f(); auto t1 = now();
+
+// ✓ 複数回測って中央値を取る、ウォームアップする
+for (int i = 0; i < 5; ++i) f();       // ウォームアップ
+std::vector<double> times;
+for (int i = 0; i < 20; ++i) {
+    auto t0 = now(); f(); times.push_back(elapsed(t0));
+}
+std::nth_element(times.begin(), times.begin() + 10, times.end());
+std::cout << "median: " << times[10] << "\n";
+```
+
+### ❌ 早すぎる最適化
+
+まず動くコードを書き、テストを書き、それから測ってください。
+
+### ❌ 遅すぎる最適化
+
+ただし、**データ構造の選択は最初に考えてください**。
+後から `std::list` を `std::vector` に変えるのは大工事です。
+
+---
+
+## 28.11 この章のまとめ
+
+- **測定せずに最適化するな。** 直感は外れる
+- ScopedTimer で手軽に、perf/Instruments で本格的に
+- Google Benchmark で `DoNotOptimize` を忘れずに
+- **最適化の効果の大きさ順:**
+  1. アルゴリズム（10〜10000倍）
+  2. メモリレイアウト・キャッシュ（2〜30倍）
+  3. 並列化（コア数倍）
+  4. コピー削減・reserve（2〜10倍）
+  5. 命令レベル・SIMD（1.5〜4倍）
+- `-O2` で測る。`-O0` の数字は無意味
+- `-fopt-info-vec` で自動ベクトル化を確認
+- **godbolt.org で生成コードを見る習慣**をつける
+- 手書きSIMDは最後の手段
+- 読みやすさを犠牲にした1%の最適化は割に合わない
+
+> 📝 **練習問題 28-1**
+>
+> あなたのコードに ScopedTimer を仕込み、
+> どこに時間がかかっているか調べてください。予想は当たりましたか?
+
+> 📝 **練習問題 28-2**
+>
+> godbolt.org で、以下の2つのループの生成コードを比較してください。
+> ```cpp
+> void f(float* a, float* b, int n) { for (int i=0;i<n;++i) a[i] += b[i]; }
+> void g(float* __restrict a, float* __restrict b, int n) { for (int i=0;i<n;++i) a[i] += b[i]; }
+> ```
+
+> 📝 **練習問題 28-3**
+>
+> 1000×1000 の行列の合計を、行優先と列優先で計算し、
+> 時間と `perf stat` のキャッシュミス率を比較してください。
+
+> 📝 **練習問題 28-4**
+>
+> `perf record` + FlameGraph で、
+> 第23章の検索プログラムのプロファイルを可視化してください。
+
+---
+
+→ [第29章 テスト・デバッグ・サニタイザ](ch29-testing-and-debugging.md)

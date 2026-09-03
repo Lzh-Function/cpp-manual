@@ -1,0 +1,617 @@
+# 第12章 コピーとムーブ
+
+「C++は速い」の正体の半分が、この章にあります。
+Pythonにはない概念なので、じっくりいきましょう。
+
+## 12.1 コピーとは何が起きているのか
+
+```cpp
+std::vector<double> a(1'000'000);
+std::vector<double> b = a;        // ★ 8MB のメモリ確保 + memcpy
+```
+
+```
+   a                              b
+   +-------------+                +-------------+
+   | data -------|--> [8MB]       | data -------|--> [8MB のコピー]
+   | size: 1M    |                | size: 1M    |
+   | capacity:1M |                | capacity:1M |
+   +-------------+                +-------------+
+```
+
+**ディープコピー**が起きます。Pythonの `b = a` が参照のコピーなのと対照的です。
+
+第6章で説明した通り、これがC++の「デフォルトは値」という設計です。
+
+---
+
+## 12.2 ムーブとは何か
+
+「引っ越し」を考えてください。
+
+- **コピー**: 新しい家に、同じ家具を全部**買い揃える**。元の家もそのまま
+- **ムーブ**: 元の家から家具を**そのまま持っていく**。元の家は空っぽになる
+
+```cpp
+std::vector<double> a(1'000'000);
+std::vector<double> b = std::move(a);   // ★ ムーブ
+```
+
+```
+   ムーブ前:
+   a                              b (まだ無い)
+   +-------------+
+   | data -------|--> [8MB]
+   | size: 1M    |
+   +-------------+
+
+   ムーブ後:
+   a (空)                         b
+   +-------------+                +-------------+
+   | data: null  |                | data -------|--> [8MB] ★同じメモリ
+   | size: 0     |                | size: 1M    |
+   +-------------+                +-------------+
+```
+
+**ポインタを付け替えるだけ**なので、要素数に関係なく**O(1)** です。
+8MBのコピーが、ポインタ3個の代入になります。
+
+> ⚠️ **ムーブ後の `a` は「有効だが未規定の状態」**です。
+> 標準ライブラリの型（vector, string など）は空になりますが、
+> **仕様上保証されているのは「破棄と代入が安全にできる」ことだけ**です。
+>
+> ```cpp
+> std::vector<int> b = std::move(a);
+> a.size();          // ✓ 呼べる（が、値は未規定。実際は 0）
+> a.push_back(1);    // ✓ 呼べる
+> a[0];              // ✗ 危険（空かもしれない）
+> a = another;       // ✓ 再代入すれば再び使える
+> ```
+>
+> **原則: ムーブした変数は、再代入するまで使わない。**
+
+---
+
+## 12.3 左辺値と右辺値
+
+ムーブを理解するには、この区別が必要です。
+
+```cpp
+int x = 5;
+
+x        // 左辺値 (lvalue): 名前があり、アドレスが取れる
+5        // 右辺値 (rvalue): 一時的な値。アドレスが取れない
+x + 1    // 右辺値: 計算結果の一時値
+f()      // 右辺値: 関数の戻り値（参照を返す場合を除く）
+```
+
+**ざっくりした判定法: `&x` と書けるなら左辺値、書けないなら右辺値。**
+
+もっと直感的には:
+
+- **左辺値** = 「名前のあるもの」= この後も使うかもしれない
+- **右辺値** = 「名前のない一時的なもの」= もう誰も使わない
+
+**右辺値は誰も使わないので、中身を盗んでよい。** これがムーブの原理です。
+
+```cpp
+std::string make_smiles();
+
+std::string a = make_smiles();     // 戻り値は右辺値 → ムーブされる（コピーなし）
+std::string b = a;                 // a は左辺値 → コピーされる
+std::string c = std::move(a);      // 明示的に右辺値扱いにする → ムーブされる
+```
+
+### `std::move` は何もしない
+
+紛らわしい名前ですが、**`std::move` は何も動かしません。**
+単に「この左辺値を右辺値として扱ってよい」という**キャスト**です。
+
+```cpp
+// 実装はこんな感じ（概念的に）
+template <typename T>
+constexpr std::remove_reference_t<T>&& move(T&& t) noexcept {
+    return static_cast<std::remove_reference_t<T>&&>(t);
+}
+```
+
+実際のムーブは、それを受け取った**ムーブコンストラクタ/ムーブ代入演算子**が行います。
+
+> 💡 `std::move` は「`rvalue_cast` 」という名前だったら誤解が減ったのに、
+> と多くの人が言っています。
+
+### 右辺値参照 `T&&`
+
+```cpp
+void f(std::string& s);        // 左辺値参照: 左辺値を受け取る
+void f(const std::string& s);  // const左辺値参照: 何でも受け取る
+void f(std::string&& s);       // ★ 右辺値参照: 右辺値だけを受け取る
+
+std::string a = "CCO";
+f(a);                // std::string& 版が呼ばれる
+f("CCO");            // std::string&& 版が呼ばれる（一時オブジェクト）
+f(std::move(a));     // std::string&& 版が呼ばれる
+```
+
+`T&&` は「この引数は一時的なもので、中身を盗んでよい」というマーカーです。
+
+---
+
+## 12.4 コピーコンストラクタとムーブコンストラクタ
+
+自分でクラスを書くとき、これらを定義できます。
+
+```cpp
+class Buffer {
+    double*     data_ = nullptr;
+    std::size_t size_ = 0;
+
+public:
+    // 通常のコンストラクタ
+    explicit Buffer(std::size_t n) : data_(new double[n]{}), size_(n) {}
+
+    // デストラクタ
+    ~Buffer() { delete[] data_; }
+
+    // ★ コピーコンストラクタ: 新しくメモリを確保して中身をコピー
+    Buffer(const Buffer& other)
+        : data_(new double[other.size_]), size_(other.size_) {
+        std::copy(other.data_, other.data_ + size_, data_);
+        std::cout << "copy ctor (" << size_ << " elements)\n";
+    }
+
+    // ★ ムーブコンストラクタ: ポインタを盗んで、相手を空にする
+    Buffer(Buffer&& other) noexcept
+        : data_(other.data_), size_(other.size_) {
+        other.data_ = nullptr;      // ★ 重要: 相手を無効化
+        other.size_ = 0;            //    でないと二重解放になる
+        std::cout << "move ctor\n";
+    }
+
+    // ★ コピー代入演算子
+    Buffer& operator=(const Buffer& other) {
+        if (this == &other) return *this;         // 自己代入チェック
+        double* new_data = new double[other.size_];   // 先に確保（例外安全）
+        std::copy(other.data_, other.data_ + other.size_, new_data);
+        delete[] data_;
+        data_ = new_data;
+        size_ = other.size_;
+        return *this;
+    }
+
+    // ★ ムーブ代入演算子
+    Buffer& operator=(Buffer&& other) noexcept {
+        if (this == &other) return *this;
+        delete[] data_;                 // 自分の資源を解放
+        data_ = other.data_;            // 盗む
+        size_ = other.size_;
+        other.data_ = nullptr;          // 相手を無効化
+        other.size_ = 0;
+        return *this;
+    }
+
+    std::size_t size() const noexcept { return size_; }
+};
+```
+
+これが「**Rule of Five**」（5つの特殊メンバ関数）です:
+
+1. デストラクタ
+2. コピーコンストラクタ
+3. コピー代入演算子
+4. ムーブコンストラクタ
+5. ムーブ代入演算子
+
+> ⚠️ **ムーブコンストラクタには必ず `noexcept` を付けてください。**
+>
+> `std::vector` は、再確保のときに要素を移動します。そのとき:
+> - ムーブが `noexcept` **なら** ムーブする（速い）
+> - `noexcept` **でないなら** コピーする（遅い。例外安全性のため）
+>
+> `noexcept` を1語書き忘れるだけで、vector の再確保が**数十倍遅くなります**。
+
+---
+
+## 12.5 ★★★ Rule of Zero ★★★
+
+ここまで読んで「面倒くさい」と思ったでしょう。正解です。
+
+**現代C++の答え: そもそも自分で書かない。**
+
+```cpp
+// ✓ これでいい
+class Molecule {
+    std::string        name_;
+    std::vector<Atom>  atoms_;
+    std::vector<Bond>  bonds_;
+    // 生ポインタを持っていないので、特殊メンバ関数は不要！
+};
+```
+
+`std::string` と `std::vector` は**自分でコピー/ムーブを正しく実装している**ので、
+それらをメンバに持つクラスは、**コンパイラが自動生成する
+コピー/ムーブで完璧に動きます**。
+
+- `Molecule a = b;` → 各メンバがコピーされる ✓
+- `Molecule a = std::move(b);` → 各メンバがムーブされる ✓（string/vector が O(1)）
+- デストラクタ → 各メンバのデストラクタが呼ばれる ✓
+
+> **Rule of Zero: リソースを直接管理しないクラスは、
+> 5つの特殊メンバ関数を一切書くな。**
+
+### いつ Rule of Five が必要か
+
+生のリソースを直接持つときだけです:
+
+- 生ポインタで `new` したメモリ
+- ファイルハンドル、ソケット
+- GPUメモリ、OSリソース
+
+**そしてそれは、スマートポインタ（第13章）やRAIIラッパで避けられます。**
+
+```cpp
+// ✗ Rule of Five が必要
+class Bad {
+    double* data_;   // 生ポインタ
+};
+
+// ✓ Rule of Zero でOK
+class Good {
+    std::vector<double> data_;              // または
+    std::unique_ptr<double[]> data2_;
+};
+```
+
+**実務で Rule of Five を書く機会は、年に1回あるかどうかです。**
+
+---
+
+## 12.6 ⚠️ Rule of Three/Five の罠
+
+**特殊メンバ関数を1つでも自分で定義すると、他の自動生成が抑制されます。**
+
+```cpp
+class Trap {
+    std::vector<double> data_;
+public:
+    ~Trap() { std::cout << "destroyed\n"; }   // ★ デストラクタだけ定義
+};
+
+Trap a;
+Trap b = std::move(a);   // ★ ムーブされない！ コピーされる
+```
+
+デストラクタを定義した瞬間、**ムーブコンストラクタ/ムーブ代入は自動生成されません**
+（コピーは非推奨ながら生成されます）。結果、意図せず遅くなります。
+
+対策:
+
+```cpp
+class Fixed {
+    std::vector<double> data_;
+public:
+    ~Fixed() { std::cout << "destroyed\n"; }
+
+    // 明示的に「デフォルトでよい」と宣言する
+    Fixed() = default;
+    Fixed(const Fixed&) = default;
+    Fixed& operator=(const Fixed&) = default;
+    Fixed(Fixed&&) noexcept = default;
+    Fixed& operator=(Fixed&&) noexcept = default;
+};
+```
+
+> 💡 **最善は、そもそもデストラクタを書かないこと**です。
+> ログ出力のためにデストラクタを書くのは、大抵は割に合いません。
+
+### コピーを禁止する
+
+```cpp
+class NonCopyable {
+public:
+    NonCopyable() = default;
+    NonCopyable(const NonCopyable&) = delete;             // ★ コピー禁止
+    NonCopyable& operator=(const NonCopyable&) = delete;
+    NonCopyable(NonCopyable&&) noexcept = default;        // ムーブは許可
+    NonCopyable& operator=(NonCopyable&&) noexcept = default;
+};
+```
+
+`= delete` で「この操作は存在しない」と宣言できます。
+使おうとするとコンパイルエラーになります。
+
+🧪 ファイルハンドル、GPUバッファ、`std::unique_ptr` などがこのパターンです。
+
+---
+
+## 12.7 コピー省略 (RVO / NRVO)
+
+「値で返すと遅いのでは?」という心配への答えです。
+
+```cpp
+std::vector<double> compute_descriptors(const Molecule& m) {
+    std::vector<double> result;
+    result.reserve(200);
+    // ... 計算 ...
+    return result;              // ★ コピーもムーブも起きない！
+}
+
+auto d = compute_descriptors(mol);
+```
+
+コンパイラは `result` を**呼び出し元の `d` の場所に直接構築します**。
+これが **RVO (Return Value Optimization)** / **NRVO (Named RVO)** です。
+
+C++17 以降、一部のケースでは**規格が省略を保証**しています:
+
+```cpp
+std::vector<double> f() {
+    return std::vector<double>(1000);   // ★ 必ず省略される（規格保証）
+}
+```
+
+名前付きローカル変数を返す NRVO は「保証」ではありませんが、
+主要コンパイラはすべて実装しています。
+
+> ⚠️ **`return std::move(x);` と書かないでください。**
+> ```cpp
+> std::vector<double> f() {
+>     std::vector<double> v;
+>     return std::move(v);   // ✗ NRVO を阻害する！ かえって遅くなる
+> }
+> ```
+> `std::move` を書くと、コンパイラは「これは右辺値参照だ」と判断して
+> NRVO を適用できなくなり、**わざわざムーブが実行されます**。
+> `return v;` と書けば、コンパイラが最適な処理を選びます。
+>
+> `-Wall -Wextra` を付けると `-Wpessimizing-move` で警告が出ます。
+
+> 💡 **結論: 大きなオブジェクトも遠慮なく値で返してよい。**
+> 「出力引数（`void f(std::vector<double>& out)`）にすべき」というのは
+> 古いC++の作法です。今は値で返す方が読みやすく、同じか速いです。
+>
+> 例外: ループの中で何度も呼ばれる関数で、バッファを使い回したい場合は
+> 出力引数の方が速いことがあります（ヒープ確保が1回で済む）。
+
+---
+
+## 12.8 実践的なムーブの使いどころ
+
+### ① コンテナへの追加
+
+```cpp
+std::vector<std::string> smiles_list;
+std::string s = read_line();
+
+smiles_list.push_back(s);              // コピー（s はまだ使える）
+smiles_list.push_back(std::move(s));   // ★ ムーブ（s はもう使わない）
+```
+
+### ② メンバへの格納（シンク引数）
+
+```cpp
+class Molecule {
+    std::string smiles_;
+public:
+    // ★ 値で受け取ってムーブする（最も効率的なパターン）
+    explicit Molecule(std::string s) : smiles_(std::move(s)) {}
+};
+
+Molecule m1("CCO");                  // 一時オブジェクト → ムーブ2回（実質タダ）
+std::string s = "CCO";
+Molecule m2(s);                      // コピー1回 + ムーブ1回
+Molecule m3(std::move(s));           // ムーブ2回
+```
+
+代替案との比較:
+
+```cpp
+// A: const& のみ
+Molecule(const std::string& s) : smiles_(s) {}
+// → 常にコピー1回。一時オブジェクトでも無駄なコピー
+
+// B: const& と && の両方（最速だが、引数が増えると組み合わせ爆発）
+Molecule(const std::string& s) : smiles_(s) {}
+Molecule(std::string&& s) : smiles_(std::move(s)) {}
+
+// C: 値渡し + move（★推奨。ほぼ最速で、コードが1つ）
+Molecule(std::string s) : smiles_(std::move(s)) {}
+```
+
+**Cが実務での標準解**です。「シンク引数は値で受けてムーブ」と覚えてください。
+
+### ③ 大きなオブジェクトの受け渡し
+
+```cpp
+std::vector<Molecule> mols = load_library();
+std::vector<Molecule> filtered = filter(std::move(mols));   // 所有権を渡す
+// mols はもう使わない
+```
+
+### ④ swap
+
+```cpp
+std::vector<int> a, b;
+std::swap(a, b);     // 内部でムーブを3回使う。O(1)
+a.swap(b);           // 同じ
+```
+
+---
+
+## 12.9 実測してみる
+
+```cpp
+// code/ch12/move_bench.cpp
+#include <chrono>
+#include <iostream>
+#include <string>
+#include <vector>
+
+struct Timer {
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    double ms() const {
+        return std::chrono::duration<double, std::milli>(
+                   std::chrono::steady_clock::now() - t0).count();
+    }
+};
+
+// 大きなデータを持つ型
+struct Fingerprint {
+    std::vector<std::uint64_t> bits;
+    explicit Fingerprint(std::size_t n = 32) : bits(n, 0xDEADBEEFCAFEBABEULL) {}
+};
+
+int main() {
+    constexpr std::size_t N = 200'000;
+
+    // --- コピー ---
+    {
+        std::vector<Fingerprint> dst;
+        dst.reserve(N);
+        Fingerprint fp;
+        Timer t;
+        for (std::size_t i = 0; i < N; ++i) dst.push_back(fp);           // コピー
+        std::cout << "copy: " << t.ms() << " ms\n";
+    }
+
+    // --- ムーブ ---
+    {
+        std::vector<Fingerprint> src(N);
+        std::vector<Fingerprint> dst;
+        dst.reserve(N);
+        Timer t;
+        for (std::size_t i = 0; i < N; ++i) dst.push_back(std::move(src[i]));
+        std::cout << "move: " << t.ms() << " ms\n";
+    }
+
+    // --- noexcept の有無による vector 再確保の差 ---
+    struct WithNoexcept {
+        std::vector<int> v = std::vector<int>(100);
+        WithNoexcept() = default;
+        WithNoexcept(const WithNoexcept&) = default;
+        WithNoexcept(WithNoexcept&& o) noexcept : v(std::move(o.v)) {}
+    };
+    struct WithoutNoexcept {
+        std::vector<int> v = std::vector<int>(100);
+        WithoutNoexcept() = default;
+        WithoutNoexcept(const WithoutNoexcept&) = default;
+        WithoutNoexcept(WithoutNoexcept&& o) : v(std::move(o.v)) {}   // noexcept なし
+    };
+
+    {
+        Timer t;
+        std::vector<WithNoexcept> v;
+        for (std::size_t i = 0; i < 100'000; ++i) v.emplace_back();   // reserve なし
+        std::cout << "realloc with noexcept   : " << t.ms() << " ms\n";
+    }
+    {
+        Timer t;
+        std::vector<WithoutNoexcept> v;
+        for (std::size_t i = 0; i < 100'000; ++i) v.emplace_back();
+        std::cout << "realloc without noexcept: " << t.ms() << " ms\n";
+    }
+}
+```
+
+出力例:
+
+```
+copy: 18.4 ms
+move: 2.1 ms
+realloc with noexcept   : 5.3 ms
+realloc without noexcept: 41.7 ms
+```
+
+**`noexcept` を書き忘れると8倍遅い**、というのが数字で見えました。
+
+---
+
+## 12.10 完全転送（軽く触れるだけ）
+
+```cpp
+template <typename... Args>
+void emplace_back(Args&&... args) {
+    new (ptr) T(std::forward<Args>(args)...);
+}
+```
+
+テンプレートの `T&&` は「**転送参照**」と呼ばれ、
+左辺値でも右辺値でも受け取れます（右辺値参照とは別物です）。
+`std::forward` で、元の左辺値性/右辺値性を保ったまま次の関数に渡します。
+
+`std::vector::emplace_back` の実装がまさにこれです。
+
+> 💡 **自分で書く機会はほとんどありません。**
+> ライブラリ実装者向けの機能です。
+> 「`emplace_back` が引数をコンストラクタにそのまま渡せるのは、
+> 完全転送のおかげ」とだけ覚えておけば十分です。
+
+---
+
+## 12.11 まとめとチェックリスト
+
+### 覚えるべきこと
+
+- **コピー** = ディープコピー（遅い）、**ムーブ** = ポインタの付け替え（O(1)）
+- `std::move` は**キャストであって、何も動かさない**
+- **ムーブ後の変数は再代入するまで使わない**
+- **Rule of Zero: 特殊メンバ関数を自分で書かない**（vector/string に任せる）
+- **1つでも書いたら、全部書くか `= default` を明示する**
+- **ムーブコンストラクタには `noexcept`**（忘れると vector が数十倍遅くなる）
+- **値で返してよい**。RVO/NRVO でコピーは消える
+- **`return std::move(x);` と書かない**（NRVO を阻害する）
+- シンク引数（保存する引数）は**値で受けて `std::move`**
+
+### 引数の受け取り方 最終決定表
+
+| 用途 | 書き方 |
+|---|---|
+| 読むだけ、重い型 | `const T&` |
+| 読むだけ、軽い型（int, double, ポインタ） | `T` |
+| 読むだけ、文字列 | `std::string_view` |
+| 読むだけ、配列 | `std::span<const T>`（C++20） |
+| 書き換える | `T&` |
+| **メンバに保存する** | **`T`（値）+ `std::move`** |
+| 所有権を奪う（unique_ptr など） | `T`（値）または `T&&` |
+
+> 📝 **練習問題 12-1**
+>
+> 12.9 のベンチマークを実行し、あなたの環境での数字を確認してください。
+
+> 📝 **練習問題 12-2**
+>
+> 次のクラスの問題点を指摘し、修正してください。
+> ```cpp
+> class Descriptor {
+>     std::vector<double> values_;
+> public:
+>     Descriptor(const std::vector<double>& v) : values_(v) {}
+>     ~Descriptor() {}
+> };
+> ```
+> （ヒント: 空のデストラクタが何を引き起こすか。引数の受け取り方）
+
+> 📝 **練習問題 12-3**
+>
+> 次のコードで、コピーとムーブがそれぞれ何回起きるか数えてください。
+> `Buffer` クラス（12.4節）に出力を仕込んで確認してみましょう。
+> ```cpp
+> std::vector<Buffer> v;
+> v.reserve(3);
+> Buffer a(100);
+> v.push_back(a);
+> v.push_back(std::move(a));
+> v.push_back(Buffer(200));
+> ```
+
+> 📝 **練習問題 12-4**
+>
+> 次の2つの関数のうち、どちらが速いですか? 実測してください。
+> ```cpp
+> std::vector<double> f1() { std::vector<double> v(1000000); return v; }
+> std::vector<double> f2() { std::vector<double> v(1000000); return std::move(v); }
+> ```
+
+---
+
+→ [第13章 スマートポインタと所有権設計](ch13-smart-pointers.md)

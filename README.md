@@ -7,10 +7,46 @@ C++を**実務で使えるレベル**まで持っていくための入門書で�
 
 ---
 
+## 書籍サイトとして読む（推奨）
+
+VitePress で静的サイトとして読めます。サイドバー目次・**日本語全文検索**・
+ダークモード・前後の章へのナビゲーションが付きます。
+
+```bash
+npm install      # 初回のみ
+npm run dev      # http://localhost:5173 が開く
+```
+
+本番ビルドとローカルプレビュー:
+
+```bash
+npm run build    # .vitepress/dist/ に静的サイトを生成
+npm run preview  # http://localhost:4173 で確認
+```
+
+> 検索は「ムーブ」「popcount」のような部分語でヒットします
+> （CJK用のN-gramトークナイザを `.vitepress/config.mts` に実装済み）。
+
+### 公開する場合
+
+現状は **ローカル閲覧のみ**の設定です（`noindex` メタタグ入り）。公開先の候補:
+
+| 方法 | 限定公開 | 手順 |
+|---|---|---|
+| **Cloudflare Pages + Access** | ✅ できる | ビルド `npm run build` / 出力 `.vitepress/dist` を設定し、Zero Trust で許可メールを登録 |
+| **GitHub Pages** | ❌ できない | `DOCS_BASE=/cpp-manual/ npm run build` して `.vitepress/dist` を Pages に配置。個人アカウントではサイトは常に全世界公開 |
+
+GitHub Pages のアクセス制御は GitHub Enterprise Cloud 専用機能のため、
+個人アカウントでは「Pages かつ限定公開」は選べません。
+
+---
+
 ## 構成
 
 ```
 cpp-manual/
+├── .vitepress/config.mts        サイト設定（目次・検索・テーマ）
+├── package.json
 └── book/
     ├── README.md                  ← 目次。ここから読み始めてください
     ├── ch00〜ch29                  本編30章
@@ -52,7 +88,7 @@ ctest --test-dir build --output-on-failure
 ```
 
 > ⚠️ サンプルコードは執筆環境にC++コンパイラが無かったため**コンパイル検証をしていません**。
-> エラーが出たら [付録B コンパイルエラー辞典](book/appendixB_コンパイルエラー辞典.md) を引いてください。
+> エラーが出たら [付録B コンパイルエラー辞典](book/appendix-b-error-dictionary.md) を引いてください。
 
 ---
 

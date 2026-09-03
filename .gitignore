@@ -67,3 +67,9 @@ out.csv
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ---- VitePress / Node ----
+node_modules/
+.vitepress/dist/
+.vitepress/cache/
+*.log

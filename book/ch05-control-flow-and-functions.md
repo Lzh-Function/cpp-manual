@@ -1,0 +1,796 @@
+# 第5章 制御構文と関数
+
+この章はPythonとよく似ているので、サクサク進みます。
+ただし**関数の引数の渡し方**だけは全く違うので、そこは丁寧にやります。
+
+## 5.1 条件分岐
+
+### if / else
+
+```python
+if x > 0:
+    print("positive")
+elif x == 0:
+    print("zero")
+else:
+    print("negative")
+```
+
+```cpp
+if (x > 0) {
+    std::cout << "positive\n";
+} else if (x == 0) {
+    std::cout << "zero\n";
+} else {
+    std::cout << "negative\n";
+}
+```
+
+違いは3つ:
+1. 条件を `( )` で囲む
+2. `elif` ではなく `else if`
+3. ブロックは `{ }`
+
+> ⚠️ **`{ }` を省略しない**
+>
+> 1文なら省略できますが、事故のもとです:
+> ```cpp
+> if (x > 0)
+>     std::cout << "a\n";
+>     std::cout << "b\n";   // ★ これは if の外！ 常に実行される
+> ```
+> Pythonのインデント感覚で読むとバグります。**必ず `{ }` を書いてください。**
+
+### 比較・論理演算子
+
+| 意味 | Python | C++ |
+|---|---|---|
+| 等しい | `==` | `==` |
+| 等しくない | `!=` | `!=` |
+| かつ | `and` | `&&` |
+| または | `or` | `\|\|` |
+| 否定 | `not` | `!` |
+| 範囲チェック | `0 < x < 10` | `0 < x && x < 10` |
+
+> ⚠️ **`0 < x < 10` は C++ では書けません**（正確には書けるが意味が違う）。
+> `(0 < x) < 10` と解釈され、`true(1) < 10` → 常に true になります。
+> **必ず `0 < x && x < 10` と書いてください。**
+
+> ⚠️ **`=` と `==` の取り違え**
+> ```cpp
+> if (x = 5) { ... }   // ★ 代入している！ 常に true（5は非ゼロ）
+> ```
+> Pythonなら SyntaxError ですが、C++は通ります（警告は出ます）。
+> `-Wall` を付けていれば `suggest parentheses around assignment` と警告されます。
+
+### 条件式の中で変数を宣言（C++17）
+
+```cpp
+// Pythonのウォルラス演算子 := に相当
+if (auto it = fp_map.find(smiles); it != fp_map.end()) {
+    use(it->second);
+}   // it はこの if の中だけで有効
+```
+
+```python
+# Python
+if (it := fp_map.get(smiles)) is not None:
+    use(it)
+```
+
+スコープを最小化できるので、積極的に使ってください。
+
+### 三項演算子
+
+```python
+y = "even" if x % 2 == 0 else "odd"
+```
+
+```cpp
+std::string y = (x % 2 == 0) ? "even" : "odd";
+```
+
+順番が違うので注意: C++は **条件 ? 真の値 : 偽の値**。
+
+### switch
+
+Pythonの `match` 文に近いですが、より制限的です。
+
+```cpp
+char c = smiles[i];
+switch (c) {
+    case 'C':
+    case 'c':
+        atomic_num = 6;
+        break;          // ★ break を忘れると次の case に落ちる
+    case 'N':
+    case 'n':
+        atomic_num = 7;
+        break;
+    case 'O':
+    case 'o':
+        atomic_num = 8;
+        break;
+    default:
+        atomic_num = 0;
+        break;
+}
+```
+
+> ⚠️ **`break` 忘れ (fall-through) は典型的バグ**です。
+> 意図的に落としたい場合は C++17 の `[[fallthrough]];` を書くと、
+> 「わざとです」と明示でき、警告も消えます。
+
+`switch` に使えるのは**整数型と列挙型だけ**です。`std::string` は使えません。
+文字列で分岐したければ `if-else` の連鎖か `std::unordered_map` を使います。
+
+> 💡 `switch` は if の連鎖よりも速いことがあります。
+> コンパイラがジャンプテーブル（配列で飛び先を決める）に変換できるためです。
+> SMILESパーサのような1文字ごとの分岐では効果的です（第20章）。
+
+---
+
+## 5.2 ループ
+
+### range-based for（最も使う）
+
+```python
+for atom in atoms:
+    print(atom)
+```
+
+```cpp
+for (const auto& atom : atoms) {
+    std::cout << atom << "\n";
+}
+```
+
+これが**基本形**です。Pythonの `for x in xs` とほぼ同じ。
+
+3つのバリエーションを使い分けます:
+
+```cpp
+for (const auto& x : v) { ... }  // 読むだけ（コピーなし）★最頻出
+for (auto& x : v)       { ... }  // 書き換える（コピーなし）
+for (auto x : v)        { ... }  // コピーを作る（int など軽い型のみ）
+```
+
+> ⚠️ **`for (auto x : v)` は要素をコピーします。**
+> `std::string` や `std::vector` の要素だと、毎回メモリ確保が起きて激遅になります。
+> **「読むだけなら `const auto&`」を体に叩き込んでください。**
+
+### インデックスが必要な場合
+
+```python
+for i in range(n):
+    ...
+```
+
+```cpp
+for (int i = 0; i < n; ++i) {
+    ...
+}
+```
+
+構造は `for (初期化; 継続条件; 更新)`。
+
+```python
+for i in range(2, 10, 2):     # 2, 4, 6, 8
+```
+
+```cpp
+for (int i = 2; i < 10; i += 2) { }
+```
+
+```python
+for i in range(n-1, -1, -1):  # 逆順
+```
+
+```cpp
+for (int i = n - 1; i >= 0; --i) { }
+```
+
+> 💡 **`++i` と `i++` の違い**
+>
+> - `++i`（前置）: インクリメントしてから値を返す
+> - `i++`（後置）: 古い値を返してからインクリメントする
+>
+> `for` の更新部では戻り値を使わないので**どちらでも同じ**ですが、
+> **`++i` を推奨**します。理由: `i++` は古い値のコピーを作る必要があり、
+> `int` なら最適化で消えますが、イテレータのような重い型では実際にコストになります。
+> 習慣として `++i` にしておけば損しません。
+
+### enumerate と zip 相当
+
+```python
+for i, atom in enumerate(atoms):
+    ...
+for a, b in zip(xs, ys):
+    ...
+```
+
+C++20 以前:
+
+```cpp
+for (std::size_t i = 0; i < atoms.size(); ++i) {
+    const auto& atom = atoms[i];
+}
+for (std::size_t i = 0; i < std::min(xs.size(), ys.size()); ++i) {
+    auto a = xs[i]; auto b = ys[i];
+}
+```
+
+C++23 の `<ranges>` があれば:
+
+```cpp
+#include <ranges>
+for (auto [i, atom] : std::views::enumerate(atoms)) { ... }
+for (auto [a, b] : std::views::zip(xs, ys)) { ... }
+```
+
+まだ対応コンパイラが限られるので、当面は添字ループで書くのが無難です。
+第17章で `ranges` を扱います。
+
+### while / do-while
+
+```cpp
+while (condition) {
+    ...
+}
+
+do {
+    ...
+} while (condition);   // ★ 最低1回は実行される。; を忘れずに
+```
+
+`do-while` はPythonにありません。「まず1回やってから条件を見る」ループです。
+
+### break / continue
+
+Pythonと同じです。
+
+```cpp
+for (const auto& mol : mols) {
+    if (mol.mw() > 500) continue;   // スキップ
+    if (found_enough())  break;     // 抜ける
+}
+```
+
+> ⚠️ Pythonの `for ... else` に相当するものはC++にありません。
+> フラグ変数を使ってください。
+> ```cpp
+> bool found = false;
+> for (const auto& x : v) {
+>     if (match(x)) { found = true; break; }
+> }
+> if (!found) { /* Python の else 節に相当 */ }
+> ```
+
+### 多重ループを一気に抜ける
+
+Pythonでは関数化するかフラグを使いますが、C++には `goto` があります。
+
+```cpp
+for (std::size_t i = 0; i < n; ++i) {
+    for (std::size_t j = 0; j < m; ++j) {
+        if (found(i, j)) goto done;
+    }
+}
+done:
+    // ...
+```
+
+> 💡 `goto` は一般に忌避されますが、**「多重ループから抜ける」用途に限れば
+> 正当な使い方**とされています。ただし、多くの場合は
+> ループを関数に切り出して `return` する方が読みやすいです。
+
+---
+
+## 5.3 関数
+
+### 基本形
+
+```python
+def tanimoto(a, b):
+    return ...
+```
+
+```cpp
+double tanimoto(const Fingerprint& a, const Fingerprint& b) {
+    return ...;
+}
+```
+
+C++では**戻り値の型を先頭に書きます**。引数にも型が必要です。
+
+```
+double tanimoto(const Fingerprint& a, const Fingerprint& b)
+  ↑        ↑              ↑
+戻り値型  関数名         引数（型 + 名前）
+```
+
+戻り値がない場合は `void`:
+
+```cpp
+void print_mol(const Molecule& m) {
+    std::cout << m.smiles() << "\n";
+}
+```
+
+### 後置戻り値型（見かけたら）
+
+```cpp
+auto tanimoto(const Fingerprint& a, const Fingerprint& b) -> double {
+    return ...;
+}
+```
+
+意味は同じです。テンプレートで戻り値型が引数に依存するときに必要になります（第15章）。
+
+### 宣言と定義
+
+```cpp
+// 宣言（プロトタイプ）: ヘッダに書く
+double tanimoto(const Fingerprint& a, const Fingerprint& b);
+
+// 定義: .cpp に書く
+double tanimoto(const Fingerprint& a, const Fingerprint& b) {
+    // ...
+}
+```
+
+> ⚠️ C++は**上から下に読む**ので、使う前に宣言が必要です。
+> ```cpp
+> int main() { f(); }       // ✗ f が何か分からない
+> void f() { }
+> ```
+> ```cpp
+> void f();                 // ✓ 先に宣言
+> int main() { f(); }
+> void f() { }
+> ```
+> Pythonでは関数定義の順序は自由ですが（呼ばれる時点で存在すればよい）、
+> C++では**使用より前に宣言が必要**です。
+
+---
+
+## 5.4 ★重要★ 引数の渡し方
+
+**この節がこの章で一番大事です。** C++の性能と正しさの半分がここで決まります。
+
+C++には3つの渡し方があります。
+
+### ① 値渡し (pass by value) — コピーされる
+
+```cpp
+void f(std::vector<int> v) {   // ★ v はコピー
+    v.push_back(1);            // 呼び出し元には影響しない
+}
+
+std::vector<int> data(1'000'000);
+f(data);   // ★ 100万要素まるごとコピー！ 遅い！
+```
+
+```
+呼び出し元:  data = [1,2,3,...,1000000]
+                      │ コピー（4MB のメモリ確保 + memcpy）
+                      ▼
+関数内:      v    = [1,2,3,...,1000000]
+```
+
+### ② 参照渡し (pass by reference) — コピーされない
+
+```cpp
+void f(std::vector<int>& v) {  // & が付いている
+    v.push_back(1);            // ★ 呼び出し元の data が変わる
+}
+
+std::vector<int> data(1'000'000);
+f(data);   // コピーなし。ポインタ1個分の情報だけ渡る
+```
+
+```
+呼び出し元:  data = [1,2,3,...,1000000]
+                      ▲
+                      │ v は data の「別名」
+関数内:      v ───────┘
+```
+
+### ③ const参照渡し (pass by const reference) — コピーされず、変更もできない
+
+```cpp
+double tanimoto(const std::vector<int>& a, const std::vector<int>& b) {
+    // a.push_back(1);   // ✗ コンパイルエラー。const なので変更不可
+    return compute(a, b);
+}
+```
+
+**これが最頻出パターンです。** 速く（コピーなし）、安全（変更されない）。
+
+### 使い分けの原則
+
+| 状況 | 書き方 |
+|---|---|
+| 読むだけ、かつ**重い型**（vector, string, 自作クラス） | `const T&` |
+| 読むだけ、かつ**軽い型**（int, double, char, ポインタ） | `T`（値渡し） |
+| 関数内で書き換えて、呼び出し元に反映したい | `T&` |
+| 関数内で**コピーが必要**（ローカルで加工する） | `T`（値渡し）※後述 |
+| ムーブして所有権を奪いたい | `T&&` または `T`（第12章） |
+
+```cpp
+// 良い例
+double compute_logp(const Molecule& mol);          // 読むだけ、重い → const&
+void   add_hydrogens(Molecule& mol);               // 書き換える → &
+int    ring_count(int atom_idx, double threshold); // 軽い型 → 値渡し
+```
+
+> 💡 **目安: `sizeof(T)` が16バイト以下なら値渡し、それ以上なら `const T&`**
+>
+> `int`(4), `double`(8), ポインタ(8) は値渡し。
+> `std::string`(32), `std::vector`(24) は `const&`。
+>
+> ただし `std::vector`(24バイト) を値渡しすると、**中身のヒープデータまでコピー**
+> されるので、サイズだけでは判断できません。
+> **「中にヒープメモリを持つ型は必ず `const&`」**と覚えるのが実用的です。
+
+### 🐍 Pythonとの対比が重要
+
+Pythonの引数渡しは「オブジェクトへの参照の値渡し」です。
+
+```python
+def f(v):
+    v.append(1)      # ★ 呼び出し元のリストが変わる（ミュータブル）
+
+def g(x):
+    x = x + 1        # ★ 呼び出し元の int は変わらない（イミュータブル）
+```
+
+Pythonでは**型によって挙動が変わる**ように見えますが、
+C++では**書き方（`&` の有無）で明示的に決まります**。
+
+```cpp
+void f(std::vector<int>& v) { v.push_back(1); }  // 変わる
+void g(std::vector<int>  v) { v.push_back(1); }  // 変わらない
+```
+
+**C++の方が明確です。** 関数のシグネチャを見るだけで、
+引数が書き換わるかどうかが分かります。
+
+### ⚠️ よくある性能バグ
+
+```cpp
+// ✗ 悪い例: 100万分子のループで毎回文字列をコピー
+for (auto smiles : all_smiles) {         // コピー発生
+    process(smiles);
+}
+
+// ✓ 良い例
+for (const auto& smiles : all_smiles) {
+    process(smiles);
+}
+```
+
+```cpp
+// ✗ 悪い例: 引数がコピーされる
+double similarity(std::vector<double> a, std::vector<double> b);
+
+// ✓ 良い例
+double similarity(const std::vector<double>& a, const std::vector<double>& b);
+```
+
+私の経験上、**「C++にしたのに遅い」の原因の第1位がこれ**です。
+
+### 値渡しが正しい場合もある
+
+関数内でコピーが必要なら、値渡しの方がむしろ効率的です:
+
+```cpp
+// 引数を加工して返す関数
+std::string canonicalize(std::string s) {   // 値渡しでよい
+    std::sort(s.begin(), s.end());          // どうせコピーが必要
+    return s;                               // ムーブされるのでコピーは1回だけ
+}
+
+// 呼び出し側
+auto r1 = canonicalize(some_string);            // コピー1回
+auto r2 = canonicalize(std::move(some_string)); // コピー0回！
+auto r3 = canonicalize("CCO");                  // 一時オブジェクトが直接ムーブされる
+```
+
+この「シンク引数は値渡し」パターンは第12章で詳しくやります。
+最初は `const&` を使っておけば十分です。
+
+---
+
+## 5.5 デフォルト引数
+
+```python
+def morgan_fp(mol, radius=2, n_bits=2048):
+    ...
+```
+
+```cpp
+Fingerprint morgan_fp(const Molecule& mol, int radius = 2, int n_bits = 2048);
+```
+
+```cpp
+auto fp1 = morgan_fp(mol);            // radius=2, n_bits=2048
+auto fp2 = morgan_fp(mol, 3);         // radius=3, n_bits=2048
+auto fp3 = morgan_fp(mol, 3, 1024);
+```
+
+制約:
+- **後ろの引数からしかデフォルト値を付けられない**
+- **キーワード引数はない**（`morgan_fp(mol, n_bits=1024)` は書けない）
+- デフォルト値は**宣言（ヘッダ）側にだけ**書く。定義側に書くと二重定義エラー
+
+```cpp
+// molecule.hpp
+Fingerprint morgan_fp(const Molecule& mol, int radius = 2);
+
+// molecule.cpp
+Fingerprint morgan_fp(const Molecule& mol, int radius) {   // = 2 を書かない
+    ...
+}
+```
+
+> 💡 **キーワード引数がないので、引数が3つ以上なら構造体を使うのが定石です**:
+> ```cpp
+> struct MorganOptions {
+>     int  radius       = 2;
+>     int  n_bits       = 2048;
+>     bool use_features = false;
+>     bool use_chirality = false;
+> };
+>
+> Fingerprint morgan_fp(const Molecule& mol, const MorganOptions& opt = {});
+>
+> // 呼び出し（C++20 の指示付き初期化）
+> auto fp = morgan_fp(mol, {.radius = 3, .use_chirality = true});
+> ```
+> これでキーワード引数っぽく書けます。実務でよく使うテクニックです。
+
+---
+
+## 5.6 関数のオーバーロード
+
+**同じ名前で、引数の型/個数が違う関数**を複数定義できます。
+
+```cpp
+double tanimoto(const Fingerprint& a, const Fingerprint& b);
+double tanimoto(const std::vector<int>& a, const std::vector<int>& b);
+double tanimoto(const Molecule& a, const Molecule& b);
+```
+
+呼び出し時、コンパイラが引数の型を見て適切なものを選びます。
+
+```python
+# Python には無い（後から定義した方で上書きされる）
+# functools.singledispatch でエミュレートできる
+```
+
+> ⚠️ **戻り値の型だけが違うオーバーロードはできません。**
+> ```cpp
+> int  f(int x);
+> double f(int x);   // ✗ エラー: 曖昧
+> ```
+> 呼び出し側 `f(3)` でどちらを選ぶか決められないからです。
+
+> ⚠️ **暗黙変換が絡むと曖昧になります。**
+> ```cpp
+> void f(int);
+> void f(double);
+> f(3.0f);   // ✗ float は int にも double にも変換できる → 曖昧エラー
+> ```
+
+---
+
+## 5.7 インライン関数
+
+```cpp
+inline int atomic_number(char symbol) {
+    switch (symbol) {
+        case 'C': return 6;
+        case 'N': return 7;
+        case 'O': return 8;
+        default:  return 0;
+    }
+}
+```
+
+`inline` の**本来の意味**は「複数の翻訳単位で定義されても二重定義エラーにしない」
+です。ヘッダに関数の実装を書きたいときに必要になります。
+
+「関数呼び出しを展開する」という最適化ヒントの意味もありますが、
+**現代のコンパイラは `inline` の有無に関係なく判断します**。
+最適化目的で書く必要はほぼありません。
+
+> 💡 **実務上のルール**: ヘッダに関数の実装を書くなら `inline` を付ける。
+> `.cpp` に書くなら不要。
+
+```cpp
+// utils.hpp
+#pragma once
+inline int atomic_number(char c) { ... }   // ヘッダに実装 → inline 必須
+```
+
+---
+
+## 5.8 再帰
+
+Pythonと同じですが、**スタックの深さ制限**の扱いが違います。
+
+```cpp
+// 分子グラフのDFS（第21章で本格的に使います）
+void dfs(const Graph& g, int node, std::vector<bool>& visited) {
+    visited[node] = true;
+    for (int nb : g.neighbors(node)) {
+        if (!visited[nb]) dfs(g, nb, visited);
+    }
+}
+```
+
+```python
+import sys
+sys.setrecursionlimit(10000)   # Python は 1000 で RecursionError
+```
+
+C++には再帰回数の制限がなく、**スタックを使い切ると即座にクラッシュ**します
+（Segmentation fault）。エラーメッセージも親切ではありません。
+
+典型的なスタックサイズは 1MB〜8MB。ローカル変数が少なければ数万〜数十万段は行けます。
+
+> ⚠️ 深い再帰が予想される場合（大きな分子のグラフ探索など）は、
+> **明示的なスタック（`std::vector`）を使った反復版**に書き換えてください。
+> 第21章で実例を示します。
+
+---
+
+## 5.9 🧪 実践: SMILES から元素をカウントする
+
+ここまでの内容を使った実用的なコードです。
+
+```cpp
+// code/ch05/count_elements.cpp
+#include <iostream>
+#include <string>
+#include <vector>
+
+// 元素記号を原子番号に変換（主要な有機元素のみ）
+int atomic_number(char c) {
+    switch (c) {
+        case 'C': case 'c': return 6;
+        case 'N': case 'n': return 7;
+        case 'O': case 'o': return 8;
+        case 'S': case 's': return 16;
+        case 'P': case 'p': return 15;
+        case 'F':           return 9;
+        case 'B': case 'b': return 5;
+        case 'I':           return 53;
+        default:            return 0;
+    }
+}
+
+// 括弧の対応が取れているかチェック
+bool brackets_balanced(const std::string& smiles) {
+    int paren = 0, square = 0;
+    for (char c : smiles) {
+        if      (c == '(') ++paren;
+        else if (c == ')') --paren;
+        else if (c == '[') ++square;
+        else if (c == ']') --square;
+        if (paren < 0 || square < 0) return false;   // 閉じすぎ
+    }
+    return paren == 0 && square == 0;
+}
+
+// 分子の重原子数を数える（簡易版。[Na+] などのブラケット原子は1個と数える）
+int count_heavy_atoms(const std::string& smiles) {
+    int count = 0;
+    bool in_bracket = false;
+
+    for (std::size_t i = 0; i < smiles.size(); ++i) {
+        char c = smiles[i];
+
+        if (c == '[') { in_bracket = true;  ++count; continue; }
+        if (c == ']') { in_bracket = false;          continue; }
+        if (in_bracket) continue;   // ブラケット内は既にカウント済み
+
+        if (atomic_number(c) != 0) {
+            // Cl, Br の2文字元素に対応
+            if (c == 'C' && i + 1 < smiles.size() && smiles[i+1] == 'l') ++i;
+            if (c == 'B' && i + 1 < smiles.size() && smiles[i+1] == 'r') ++i;
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 分岐の深さ（最大ネスト）を測る
+int max_branch_depth(const std::string& smiles) {
+    int depth = 0, max_depth = 0;
+    for (char c : smiles) {
+        if (c == '(') { ++depth; if (depth > max_depth) max_depth = depth; }
+        else if (c == ')') --depth;
+    }
+    return max_depth;
+}
+
+int main() {
+    std::vector<std::string> tests = {
+        "CCO",                          // エタノール
+        "c1ccccc1",                     // ベンゼン
+        "CC(=O)Oc1ccccc1C(=O)O",        // アスピリン
+        "Cn1cnc2c1c(=O)n(C)c(=O)n2C",   // カフェイン
+        "CC(C)Cc1ccc(cc1)C(C)C(=O)O",   // イブプロフェン
+        "CC(=O)Oc1ccccc1C(=O)O)",       // 壊れたSMILES（括弧が余分）
+    };
+
+    for (const auto& s : tests) {
+        std::cout << s << "\n";
+        std::cout << "  balanced    : "
+                  << (brackets_balanced(s) ? "yes" : "NO") << "\n";
+        std::cout << "  heavy atoms : " << count_heavy_atoms(s) << "\n";
+        std::cout << "  branch depth: " << max_branch_depth(s) << "\n\n";
+    }
+    return 0;
+}
+```
+
+```bash
+g++ -std=c++20 -O2 -Wall -Wextra count_elements.cpp -o count_elements
+./count_elements
+```
+
+このコードのポイント:
+
+- `const std::string&` で受け取る（コピーなし）
+- `switch` による高速な文字分岐
+- `for (char c : smiles)` — `char` は軽いので値渡しでOK
+- 早期 `return`（`return false`）でネストを浅く保つ
+
+第20章では、これを本格的なパーサに育てます。
+
+---
+
+## 5.10 この章のまとめ
+
+- 制御構文はPythonとほぼ同じ。条件は `( )`、ブロックは `{ }`
+- **`{ }` を省略しない**。`0 < x < 10` は書けない
+- range-based for が基本。**`const auto&` を使う**
+- `++i` を習慣に
+- **関数の引数渡しが最重要**:
+  - 読むだけ + 重い型 → **`const T&`**
+  - 読むだけ + 軽い型（int, double） → `T`
+  - 書き換える → `T&`
+- デフォルト引数はあるが**キーワード引数はない** → 構造体で代用
+- オーバーロードで同名関数を作れる
+- ヘッダに関数実装を書くなら `inline`
+- 再帰の深さ制限がない代わりに、超えるとクラッシュする
+
+> 📝 **練習問題 5-1**
+>
+> `count_heavy_atoms` に `Cl` と `Br` の処理がありますが、`Se`, `Si`, `As` などは
+> 対応していません。2文字元素のリストを `std::vector<std::string>` で持ち、
+> 汎用的に処理するよう改造してください。
+
+> 📝 **練習問題 5-2**
+>
+> 次の関数のシグネチャを、性能と安全性の観点から改善してください。
+> ```cpp
+> std::vector<double> normalize(std::vector<double> data, double mean, double sd);
+> bool contains(std::vector<std::string> names, std::string target);
+> void scale_coords(std::vector<double> coords, double factor);
+> ```
+> （3つ目は「呼び出し元に反映されない」というバグを含んでいます）
+
+> 📝 **練習問題 5-3**
+>
+> SMILES 中の環結合番号（`c1ccccc1` の `1`）が正しく対になっているか
+> チェックする関数 `bool ring_closures_valid(const std::string&)` を書いてください。
+> ヒント: 各数字の出現回数が偶数かどうか。
+> （ただし `%10` のような2桁表記は無視してよい）
+
+---
+
+→ [第6章 メモリモデル：スタックとヒープ](ch06-memory-model.md)
