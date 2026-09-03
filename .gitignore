@@ -1,0 +1,69 @@
+# ---- ビルド成果物 ----
+build/
+build-*/
+cmake-build-*/
+out/
+_deps/
+
+# ---- CMake ----
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+install_manifest.txt
+
+# ---- オブジェクト・ライブラリ・実行ファイル ----
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.gch
+*.pch
+
+# ---- Python バインディング ----
+*.pyd
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+wheelhouse/
+.venv/
+venv/
+
+# ---- プロファイル・カバレッジ ----
+*.gcda
+*.gcno
+*.gcov
+coverage.info
+coverage_html/
+perf.data*
+callgrind.out.*
+massif.out.*
+*.profraw
+*.profdata
+
+# ---- 本書のサンプルが生成するファイル ----
+test_db.bin
+descriptors.csv
+out.csv
+
+# ---- エディタ・OS ----
+.vscode/
+.idea/
+.cache/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

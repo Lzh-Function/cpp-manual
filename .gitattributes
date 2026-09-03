@@ -1,0 +1,32 @@
+# リポジトリ内は常に LF で保存する（作業コピーは各OSのネイティブ改行）
+* text=auto eol=lf
+
+# テキストとして扱うファイル
+*.md    text
+*.cpp   text
+*.hpp   text
+*.h     text
+*.txt   text
+*.json  text
+*.yml   text
+*.yaml  text
+*.cmake text
+*.smi   text
+*.py    text
+.gitignore     text
+.gitattributes text
+.clang-format  text
+
+# バイナリ（差分を取らない）
+*.png  binary
+*.jpg  binary
+*.pdf  binary
+*.bin  binary
+*.so   binary
+*.dll  binary
+*.a    binary
+*.lib  binary
+
+# GitHub の言語統計から本文とサンプルを除外しない設定
+# （このリポジトリは書籍なので Markdown が主。誤検出を防ぐ）
+book/code/** linguist-documentation=false
