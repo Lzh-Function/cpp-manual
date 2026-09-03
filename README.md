@@ -27,17 +27,39 @@ npm run preview  # http://localhost:4173 で確認
 > 検索は「ムーブ」「popcount」のような部分語でヒットします
 > （CJK用のN-gramトークナイザを `.vitepress/config.mts` に実装済み）。
 
-### 公開する場合
+### 公開: GitHub Pages
 
-現状は **ローカル閲覧のみ**の設定です（`noindex` メタタグ入り）。公開先の候補:
+`main` に push すると GitHub Actions が自動でビルド・デプロイします
+（[.github/workflows/deploy-pages.yml](.github/workflows/deploy-pages.yml)）。
 
-| 方法 | 限定公開 | 手順 |
-|---|---|---|
-| **Cloudflare Pages + Access** | ✅ できる | ビルド `npm run build` / 出力 `.vitepress/dist` を設定し、Zero Trust で許可メールを登録 |
-| **GitHub Pages** | ❌ できない | `DOCS_BASE=/cpp-manual/ npm run build` して `.vitepress/dist` を Pages に配置。個人アカウントではサイトは常に全世界公開 |
+**公開URL: https://lzh-function.github.io/cpp-manual/**
 
-GitHub Pages のアクセス制御は GitHub Enterprise Cloud 専用機能のため、
-個人アカウントでは「Pages かつ限定公開」は選べません。
+配信パスの検証をローカルで行う場合:
+
+```bash
+GH_PAGES=1 npm run build       # base を /cpp-manual/ にしてビルド
+GH_PAGES=1 npm run preview     # http://localhost:4173/cpp-manual/
+```
+
+`preview` にも同じ環境変数が要ります（付け忘れるとサーバがルート配信になり、
+`/cpp-manual/` 前提でビルドされたHTMLと噛み合わず全部404になります）。
+
+> ⚠️ Git Bash で `DOCS_BASE=/cpp-manual/` を使うと MSYS のパス変換で
+> `C:/Program Files/Git/...` に化けます。`GH_PAGES=1` を使ってください。
+
+#### 検索エンジンへの掲載について
+
+現在 `noindex, nofollow` を設定してあるため、**サイトは公開されていますが
+Google などの検索結果には出ません**（URLを知っている人だけが辿り着けます）。
+
+検索エンジンに載せたくなったら、`.vitepress/config.mts` の以下の行を削除してください:
+
+```ts
+['meta', { name: 'robots', content: 'noindex, nofollow, noarchive' }],
+```
+
+> なお、GitHub Pages に**アクセス制限はかけられません**（個人アカウントの場合）。
+> 本当に閲覧者を限定したい場合は Cloudflare Pages + Cloudflare Access が必要です。
 
 ---
 

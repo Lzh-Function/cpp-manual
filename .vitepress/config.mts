@@ -1,8 +1,15 @@
 import { defineConfig } from 'vitepress'
 
-// GitHub Pages などのサブパス配信時は DOCS_BASE=/cpp-manual/ を指定する。
-// ローカル(npm run dev)やCloudflare Pagesではルート配信なので既定は '/'。
-const base = process.env.DOCS_BASE ?? '/'
+// 配信パスの決定。
+//
+//   ローカル / Cloudflare Pages など        → '/'          (既定)
+//   GitHub Pages のプロジェクトサイト        → '/cpp-manual/'  (GH_PAGES=1)
+//
+// ※ DOCS_BASE で明示指定もできるが、Git Bash では '/cpp-manual/' のような
+//    値が MSYS のパス変換で 'C:/Program Files/Git/...' に化けるため、
+//    通常は GH_PAGES=1 を使うこと。
+const REPO_BASE = '/cpp-manual/'
+const base = process.env.DOCS_BASE ?? (process.env.GH_PAGES ? REPO_BASE : '/')
 
 /**
  * 日本語（CJK）対応のトークナイザ。
