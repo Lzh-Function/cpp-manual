@@ -38,12 +38,12 @@ jobs:
           node-version: '22'
           cache: npm
 
+      # 前提: リポジトリ設定 (Settings → Pages) で
+      #       Source が "GitHub Actions" になっていること。
+      # ※ enablement: true による自動有効化は GITHUB_TOKEN の権限では実行できず
+      #    ("Resource not accessible by integration")、誤解を招くだけなので使わない。
       - name: Setup Pages
         uses: actions/configure-pages@v5
-        with:
-          # リポジトリ設定で Pages が未有効なら、この場で有効化して
-          # ソースを "GitHub Actions" にする（pages: write 権限が必要）
-          enablement: true
 
       - name: Install dependencies
         run: npm ci
