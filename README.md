@@ -114,4 +114,26 @@ ctest --test-dir build --output-on-failure
 
 ---
 
+## 関連
+
+C版もあります → **[PythonのためのC拡張入門](https://lzh-function.github.io/c-manual/)**
+（[リポジトリ](https://github.com/Lzh-Function/c-manual)）
+
+同じ読者層に向けた本ですが、軸が違います。
+
+| | 本書（C++版） | [C版](https://lzh-function.github.io/c-manual/) |
+|---|---|---|
+| 軸 | **速さ**（メモリレイアウトとアルゴリズム） | **境界の設計**（PythonとCの繋ぎ方） |
+| データ構造 | STL がある | 自作する |
+| Pythonとの接続 | pybind11（第26章） | **ctypes / cffi が主題**（第III部） |
+| ABI | コンパイラ・バージョンを揃える必要 | **安定。wheel を1つにできる** |
+| 分量 | 約26,000行 | 約18,000行 |
+
+用途で使い分けてください:
+
+- **STLが欲しい / 既存C++資産（RDKitなど）がある / 大きなコードを書く** → 本書
+- **境界を薄くしたい / 依存を減らしたい / 他言語からも呼びたい** → C版
+
+---
+
 *Happy compiling.*
